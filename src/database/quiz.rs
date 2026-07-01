@@ -21,8 +21,9 @@ static CONNECTION: Lazy<Mutex<Connection>> = Lazy::new(|| {
         id INTEGER PRIMARY KEY,
         question TEXT NOT NULL,
         answer TEXT NOT NULL,
-        test_after DATETIME,
+        test_after DATETIME NOT NULL,
         quiz_id INTEGER NOT NULL,
+        consecutive_correct INTEGER NOT NULL,
         FOREIGN KEY (quiz_id)
             REFERENCES quiz(id)
             ON DELETE CASCADE
@@ -68,7 +69,7 @@ pub fn add_round_to_current_quiz(args: AddArgs) -> Option<Quiz> {
         Some(id) => id,
         None => return None,
     };
-    conn.execute("INSERT INTO round (question, answer, test_after, quiz_id) VALUES (?, ?, datetime('now'), ?)", params![
+    conn.execute("INSERT INTO round (question, answer, test_after, quiz_id, consecutive_correct) VALUES (?, ?, datetime('now'), ?, 0)", params![
         args.question,
         args.answer,
         quiz_id,
@@ -82,10 +83,10 @@ pub fn resolve_current_round(args: EvalArgs) -> Option<Quiz> {
         Some(id) => id,
         None => return None,
     };
-    let round_id: Option<i64> = conn
+    let (round_id, consecutive_correct): (i64, i64) = conn
         .query_row(
             "
-            SELECT id
+            SELECT id, consecutive_correct
             FROM round
             WHERE quiz_id = ?
             AND (test_after IS NULL OR test_after <= CURRENT_TIMESTAMP)
@@ -93,18 +94,27 @@ pub fn resolve_current_round(args: EvalArgs) -> Option<Quiz> {
             LIMIT 1;
 ",
             [quiz_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    let added_duration = if args.pass {
-        Duration::days(1)
+    let consecutive_correct = if args.pass {
+        consecutive_correct + 1
     } else {
-        Duration::seconds(5)
+        0
+    };
+    let added_duration = match consecutive_correct {
+        0 => Duration::seconds(5),
+        1 => Duration::minutes(10),
+        2 => Duration::hours(1),
+        3 => Duration::hours(6),
+        4 => Duration::days(1),
+        5 => Duration::days(30),
+        _ => Duration::days(365),
     };
     let test_after: DateTime<Utc> = Utc::now() + added_duration;
     conn.execute(
-        "UPDATE round SET test_after = ? WHERE id = ?",
-        params![test_after, round_id,],
+        "UPDATE round SET test_after = ?, consecutive_correct = ? WHERE id = ?",
+        params![test_after, consecutive_correct, round_id,],
     )
     .unwrap();
     Some(load_quiz(&conn, quiz_id))
